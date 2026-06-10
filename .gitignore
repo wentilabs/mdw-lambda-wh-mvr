@@ -1,0 +1,11 @@
+.env
+node_modules/
+service-account.json
+*.zip
+.env-2
+.DS_Store
+csv/
+# *.txt
+
+manpower-extraction-results.json
+manpower-images-summary.json

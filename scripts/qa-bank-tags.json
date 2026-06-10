@@ -1,0 +1,50 @@
+{
+  "_doc_": "File-path → tags map used by test-v2-consistency.js --affected=<files>. Keys ending in / are prefix matches. Tags listed here are filtered against entries' auto-derived + explicit tags. Tag namespaces: domain:<X>, type:<Y>, metric:<Z>, bypass, smoke, and any custom labels on bank entries.",
+
+  "usecases/qa_agent_v2/parser/parse-intent.js": ["smoke"],
+  "usecases/qa_agent_v2/parser/intent-schema.js": ["smoke"],
+  "usecases/qa_agent_v2/planner/plan-from-intent.js": ["smoke"],
+  "usecases/qa_agent_v2/agg/": ["smoke"],
+  "usecases/qa_agent_v2/format/render.js": ["smoke"],
+  "usecases/qa_agent_v2/format/overrides.js": ["smoke"],
+  "usecases/qa_agent_v2/format/polish.js": ["smoke"],
+  "usecases/qa_agent_v2/index.js": ["smoke"],
+  "usecases/qa_agent_v2/shared/": ["smoke"],
+
+  "usecases/qa_agent_v2/data/manpower.js": ["domain:manpower"],
+  "usecases/qa_agent_v2/data/safety.js": ["domain:safety"],
+  "usecases/qa_agent_v2/data/soil_disposal.js": ["domain:soil_disposal"],
+  "usecases/qa_agent_v2/data/wbgt.js": ["domain:wbgt"],
+  "usecases/qa_agent_v2/data/noise.js": ["domain:noise"],
+  "usecases/qa_agent_v2/data/piling_progress.js": ["domain:piling_progress"],
+  "usecases/qa_agent_v2/data/im_progress.js": ["domain:im_progress"],
+  "usecases/qa_agent_v2/data/pile_cap.js": ["domain:pile_cap"],
+  "usecases/qa_agent_v2/data/concrete.js": ["domain:concrete"],
+  "usecases/qa_agent_v2/data/document_tracking.js": ["domain:document_tracking"],
+  "usecases/qa_agent_v2/data/document_log.js": ["domain:document_log"],
+  "usecases/qa_agent_v2/data/report_generation.js": ["domain:report_generation"],
+  "usecases/qa_agent_v2/data/master_register_image.js": ["domain:master_register_image"],
+  "usecases/qa_agent_v2/data/safety_image.js": ["domain:safety_image"],
+  "usecases/qa_agent_v2/data/novade_sync.js": ["domain:novade_sync"],
+  "usecases/qa_agent_v2/data/index.js": ["smoke"],
+
+  "usecases/qa_agent/index.js": ["smoke"],
+  "usecases/qa_agent/bypass/report_generation.js": ["domain:report_generation"],
+  "usecases/qa_agent/bypass/safety_summary.js": ["domain:report_generation", "domain:novade_sync"],
+  "usecases/qa_agent/bypass/safety-image.js": ["domain:safety_image", "domain:novade_sync"],
+  "usecases/qa_agent/bypass/master-register-image.js": ["domain:master_register_image"],
+  "usecases/qa_agent/bypass/document_log.js": ["domain:document_log"],
+  "usecases/qa_agent/bypass/novade_sync.js": ["domain:novade_sync"],
+
+  "usecases/health_safety/safety-image.js": ["domain:safety_image", "domain:novade_sync"],
+
+  "utils/gsheet.js": ["smoke"],
+  "utils/action.js": ["smoke"],
+  "utils/novade-api.js": ["domain:novade_sync"],
+  "utils/openai.js": ["smoke"],
+
+  "scripts/qa-question-bank.js": ["smoke"],
+  "scripts/test-v2-consistency.js": ["smoke"],
+
+  "index.js": ["smoke", "domain:novade_sync"]
+}

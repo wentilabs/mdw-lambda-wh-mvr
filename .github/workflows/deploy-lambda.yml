@@ -1,0 +1,94 @@
+name: Deploy to AWS Lambda
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    # The `secrets` context is NOT usable inside `if:` expressions ("Unrecognized
+    # named-value: 'secrets'"), but IS usable in env values — so the presence check
+    # is materialized here and the steps below gate on env.AWS_CREDS_PRESENT.
+    env:
+      AWS_CREDS_PRESENT: ${{ secrets.AWS_ACCESS_KEY_ID != '' && secrets.AWS_SECRET_ACCESS_KEY != '' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@master
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          # Latest LTS — tracks the Lambda runtime (the rollout always provisions
+          # the newest Lambda-supported Node, which is always an LTS line).
+          node-version: lts/*
+          cache: "yarn"
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Create deployment package
+        run: |
+          mkdir -p dist
+          cp -r api usecases handlers utils config index.js package.json yarn.lock dist/
+          cd dist && yarn install --production --frozen-lockfile
+          zip -r ../function.zip . --exclude "scripts/*" --exclude "index-dev.js"
+
+      # The rollout creates this repo (initial commit + FUNCTION_NAME wiring + dev
+      # branch) BEFORE the repo's AWS secrets and the Lambda exist, so those early
+      # push-triggered runs must no-op gracefully instead of failing red.
+      - name: Skip notice (secrets not yet configured)
+        if: env.AWS_CREDS_PRESENT != 'true'
+        run: echo "::notice::AWS repo secrets not configured yet (rollout provisioning in progress) — skipping deploy. The rollout deploys explicitly via workflow_dispatch once provisioning completes."
+
+      - name: Configure AWS credentials
+        if: env.AWS_CREDS_PRESENT == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-southeast-1
+
+      - name: Deploy to Lambda
+        if: env.AWS_CREDS_PRESENT == 'true'
+        env:
+          # Replaced by the rollout system at repo creation time. The sentinel
+          # value `__FUNCTION_NAME__` MUST be substituted with the actual
+          # Lambda function name (e.g. `mdw-lambda-wh-jurong-east`) BEFORE the
+          # first push to main, otherwise this deploy will fail.
+          FUNCTION_NAME: __FUNCTION_NAME__
+        run: |
+          # Built by concatenation so the rollout's __FUNCTION_NAME__ -> real-name
+          # replacement does NOT rewrite this guard's sentinel (only the env value above).
+          PLACEHOLDER="__FUNCTION""_NAME__"
+          if [ "$FUNCTION_NAME" = "$PLACEHOLDER" ]; then
+            echo "::error::FUNCTION_NAME placeholder was not replaced. Run the rollout flow before pushing."
+            exit 1
+          fi
+          # Push to `dev` branch deploys to the dev function; `main` deploys to prod.
+          if [ "${{ github.ref_name }}" = "dev" ]; then
+            DEPLOY_FUNCTION="${FUNCTION_NAME}-dev"
+          else
+            DEPLOY_FUNCTION="${FUNCTION_NAME}"
+          fi
+          # Skip gracefully if the target function does not exist YET. The rollout
+          # creates the repo (Initial commit + the FUNCTION_NAME wiring commit +
+          # the dev branch) — each of which auto-fires this workflow on push —
+          # BEFORE the Lambda is provisioned a few steps later. The rollout then
+          # deploys explicitly via workflow_dispatch once the Lambda exists. Without
+          # this guard those early push runs fail with ResourceNotFoundException and
+          # show a red X on the commits even though the real (dispatch) deploy works.
+          if ! aws lambda get-function --function-name "$DEPLOY_FUNCTION" >/dev/null 2>&1; then
+            echo "::notice::Lambda $DEPLOY_FUNCTION does not exist yet — skipping (it will be deployed via workflow_dispatch once provisioning creates it)."
+            exit 0
+          fi
+          echo "Deploying to Lambda function: $DEPLOY_FUNCTION"
+          aws lambda update-function-code \
+            --function-name "$DEPLOY_FUNCTION" \
+            --zip-file fileb://function.zip
