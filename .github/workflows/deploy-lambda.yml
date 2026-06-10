@@ -59,12 +59,12 @@ jobs:
         if: env.AWS_CREDS_PRESENT == 'true'
         env:
           # Replaced by the rollout system at repo creation time. The sentinel
-          # value `__FUNCTION_NAME__` MUST be substituted with the actual
+          # value `mdw-lambda-wh-mvr` MUST be substituted with the actual
           # Lambda function name (e.g. `mdw-lambda-wh-jurong-east`) BEFORE the
           # first push to main, otherwise this deploy will fail.
-          FUNCTION_NAME: __FUNCTION_NAME__
+          FUNCTION_NAME: mdw-lambda-wh-mvr
         run: |
-          # Built by concatenation so the rollout's __FUNCTION_NAME__ -> real-name
+          # Built by concatenation so the rollout's mdw-lambda-wh-mvr -> real-name
           # replacement does NOT rewrite this guard's sentinel (only the env value above).
           PLACEHOLDER="__FUNCTION""_NAME__"
           if [ "$FUNCTION_NAME" = "$PLACEHOLDER" ]; then
