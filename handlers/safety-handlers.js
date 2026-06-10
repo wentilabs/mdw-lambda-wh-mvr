@@ -30,6 +30,7 @@ const {
   deleteRow,
 } = require("../utils/gsheet");
 const { getSupabaseClient } = require("../utils/common");
+const { resolvePicFromMentions, stripMentionIds } = require("../utils/name-list");
 const { previousMonthSafetyTab } = require("../utils/safety-sheets");
 const { sendWhatsAppReply, sendWhatsAppMessage } = require("../utils/sendMessage");
 const { writeToMonthlyMonitoringSheet } = require("./wbgt-monthly-handlers");
@@ -43,6 +44,42 @@ const metadata = {
 };
 
 const DEFAULT_SAFETY_SHEET_NAME = "Safety";
+
+// ── Missing-PIC follow-up marker ──
+// When a hazard is created without a resolvable PIC, the bot replies asking the reporter
+// to tag the person, embedding "[ref: PIC-<originalMessageId>]" in that reply. On the
+// reporter's follow-up reply, WhatsApp carries the bot's text verbatim in `quotedBody`, so
+// we read the original message id back from there — stateless, no DB of outgoing ids. The
+// distinct "PIC-" namespace never collides with the Novade-Preview "[ref:]" marker.
+const PIC_REF_MARKER_RE = /\[ref:\s*PIC-([A-Za-z0-9_-]+)\s*\]/i;
+
+/**
+ * Extract the original safety message id from a "[ref: PIC-<messageId>]" marker.
+ * Structured-token parse (not NLP). Returns null when no marker is present.
+ * @param {string} text
+ * @returns {string|null}
+ */
+function parsePicRef(text) {
+  if (!text || typeof text !== "string") return null;
+  const m = text.match(PIC_REF_MARKER_RE);
+  return m ? m[1] : null;
+}
+
+/**
+ * The bot's reply asking the reporter to tag the PIC. Ends with the [ref: PIC-<id>] marker
+ * carrying the ORIGINAL message id so the follow-up reply can be traced back to the row.
+ * @param {string} originalMessageId
+ * @returns {string}
+ */
+function buildPicRequestMessage(originalMessageId) {
+  return [
+    "⚠️ Who will be in charge of this safety issue?",
+    "",
+    "Please *reply to this message* and *@mention* the person responsible for following up on it (you can tag more than one).",
+    "",
+    `[ref: PIC-${originalMessageId}]`,
+  ].join("\n");
+}
 
 /**
  * Resolve a quotedMessageId to the album parent's messageId via whatsapp_listener.
@@ -298,6 +335,7 @@ async function updateExistingSafetyIssueRow({
     if (issueData.location) normalizedValues.Location = issueData.location;
     if (issueData.severity) normalizedValues.Severity = issueData.severity;
     if (issueData.proposed_fix) normalizedValues["Proposed Fix"] = issueData.proposed_fix;
+    if (issueData.pic) normalizedValues.PIC = issueData.pic;
   } else {
     // Full update (for edit operations)
     normalizedValues.Date = messageDate || existingRow.Date || "";
@@ -306,6 +344,7 @@ async function updateExistingSafetyIssueRow({
     normalizedValues.Location = issueData.location || "";
     normalizedValues.Severity = issueData.severity || "";
     normalizedValues["Proposed Fix"] = issueData.proposed_fix || "";
+    normalizedValues.PIC = typeof issueData.pic === "string" ? issueData.pic : "";
     normalizedValues.Status = issueData.status || existingRow.Status || "open";
     normalizedValues["Created Timestamp"] = createdTimestampValue;
     // ChatGroup: prefer the (re-)edited message's chatName; preserve existing
@@ -428,6 +467,7 @@ const SAFETY_SHEET_HEADERS = [
   "Location",
   "Severity",
   "Proposed Fix",
+  "PIC",
   "Image",
   "Status",
   "Sender",
@@ -726,8 +766,13 @@ async function createSafetyIssue(message, mediaUrl = null, caption = null, sende
             description:
               'Suggested solution or fix for the safety issue, if mentioned in the caption or message. MUST ALWAYS USE "Not specified" for FYI and Good Observation.',
           },
+          pic: {
+            type: "string",
+            description:
+              'Person-in-charge (PIC) — extract ONLY when the message explicitly mentions one (e.g. "*Person-in-charge:* Bongsi", "PIC: John", "in-charge: Ali"). Copy the name VERBATIM from the message. Return an empty string "" if no PIC is mentioned. NEVER infer or make up a name.',
+          },
         },
-        required: ["description", "category", "location", "severity", "proposed_fix"],
+        required: ["description", "category", "location", "severity", "proposed_fix", "pic"],
       },
     },
   ];
@@ -822,6 +867,7 @@ async function createSafetyIssue(message, mediaUrl = null, caption = null, sende
 
             return {
               ...item.arguments,
+              pic: typeof item.arguments?.pic === "string" ? item.arguments.pic : "",
               mediaUrl: mediaUrl ? `=image("${mediaUrl}",2)` : "",
               status: status,
             };
@@ -858,6 +904,28 @@ async function createSafetyIssue(message, mediaUrl = null, caption = null, sende
           reason: "FYI category - not written to sheet",
         };
       }
+
+      // PIC resolution: a safety message designates the person-in-charge by @mentioning
+      // them ("@<lid digits>"). Resolve those mention(s) to real names via the
+      // "Name List (proposed)" tab. A raw mention id must NEVER land in the PIC column, so
+      // we always strip "@<digits>" from the LLM-extracted pic first (leaving any explicit
+      // "PIC: name" text), then override with the resolved real names when available.
+      // NOTE: do NOT add a new key to the item — writeGenericData maps columns by
+      // Object.values() insertion order, so an extra property would shift a column.
+      const llmPic = safetyItemsWithImage[0].pic;
+      let resolvedPic = stripMentionIds(llmPic);
+      if (groupConfig?.spreadsheetId) {
+        try {
+          const { picText } = await resolvePicFromMentions(messageContent, groupConfig.spreadsheetId);
+          if (picText) resolvedPic = picText;
+        } catch (e) {
+          console.warn("[PIC @mention] resolution failed (non-blocking):", e.message);
+        }
+      }
+      if (resolvedPic !== llmPic) {
+        console.log(`[PIC] "${llmPic}" → "${resolvedPic}"`);
+      }
+      safetyItemsWithImage[0].pic = resolvedPic;
 
       // Extract date from message timestamp, or use current date as fallback
       let messageDate;
@@ -986,6 +1054,41 @@ async function createSafetyIssue(message, mediaUrl = null, caption = null, sende
           spreadsheetId: groupConfig?.spreadsheetId,
         },
       );
+
+      // Missing-PIC follow-up: if a real hazard (status "open") was created with no
+      // resolvable PIC, reply to the ORIGINAL message asking the reporter to tag the PIC.
+      // (Good Observation has status "N/A" → skipped.) Non-blocking — a send failure must
+      // never fail the create. The reporter's reply is handled by handlePicFollowupReply.
+      const created = safetyItemsWithImage[0];
+      if (
+        created &&
+        created.status === "open" &&
+        !String(created.pic || "").trim() &&
+        groupConfig?.spreadsheetId &&
+        senderDetails?.messageId
+      ) {
+        try {
+          // sendWhatsAppReply MUST get the SERIALIZED message id (messageIdSerialized) to
+          // actually quote the original — the short messageId does NOT quote. The [ref:]
+          // marker still carries the plain messageId (that's what the Sender column stores
+          // and findExistingSafetyIssueRow matches on).
+          const replyToSerialized =
+            (typeof message === "object" && (message.messageIdSerialized || message.messageId)) ||
+            senderDetails?.messageIdSerialized ||
+            senderDetails?.messageId ||
+            null;
+          await sendWhatsAppReply(
+            (typeof message === "object" && (message.chatId || message.from)) || groupConfig?.chatId,
+            buildPicRequestMessage(senderDetails.messageId),
+            undefined,
+            undefined,
+            replyToSerialized,
+          );
+          console.log(`[PIC ask] requested PIC for new issue (messageId ${senderDetails.messageId})`);
+        } catch (e) {
+          console.warn("[PIC ask] reply failed (non-blocking):", e.message);
+        }
+      }
 
       return {
         functionCalls,
@@ -2222,7 +2325,21 @@ async function handleEditedSafetyMessage(message, senderDetails, groupConfig = n
       location: extractedData.location || "",
       severity: extractedData.severity || "",
       proposed_fix: extractedData.proposed_fix || "",
+      pic: typeof extractedData.pic === "string" ? extractedData.pic : "",
     };
+
+    // PIC resolution from @mentions in the edited body (same as create path): strip any
+    // raw mention id, then override with resolved real names when available. Non-blocking.
+    let resolvedEditPic = stripMentionIds(issueData.pic);
+    if (groupConfig?.spreadsheetId) {
+      try {
+        const { picText } = await resolvePicFromMentions(messageContent, groupConfig.spreadsheetId);
+        if (picText) resolvedEditPic = picText;
+      } catch (e) {
+        console.warn("[PIC @mention edit] resolution failed (non-blocking):", e.message);
+      }
+    }
+    issueData.pic = resolvedEditPic;
 
     // Calculate messageDate from senderDetails.timestamp
     let messageDate;
@@ -2258,9 +2375,77 @@ async function handleEditedSafetyMessage(message, senderDetails, groupConfig = n
   }
 }
 
+/**
+ * Handle a reply to the bot's "please tag the PIC" ask. The reply's `quotedBody` carries the
+ * "[ref: PIC-<originalMessageId>]" marker; we trace it to the exact issue row and fill its
+ * PIC from the reply's @mentions — the SAME flow as the create path (resolvePicFromMentions).
+ *
+ * Returns a result object when this IS a PIC follow-up (caller should stop processing), or
+ * null when `quotedBody` has no PIC marker (let normal processing continue).
+ */
+async function handlePicFollowupReply(message, senderDetails = null, groupConfig = null) {
+  const quotedBody = typeof message === "object" ? message.quotedBody : null;
+  const originalMessageId = parsePicRef(quotedBody);
+  if (!originalMessageId) return null; // not a PIC follow-up
+
+  console.log(`[PIC followup] reply detected → original messageId ${originalMessageId}`);
+
+  const existingRow = await findExistingSafetyIssueRow(
+    { messageId: originalMessageId, parentMessageId: originalMessageId },
+    groupConfig,
+  );
+  if (!existingRow) {
+    console.warn(`[PIC followup] no safety row found for messageId ${originalMessageId} — ignoring.`);
+    return { picFollowup: true, notFound: true };
+  }
+
+  const body = typeof message === "object" ? message.body : message;
+  let picText = "";
+  try {
+    ({ picText } = await resolvePicFromMentions(body, groupConfig?.spreadsheetId));
+  } catch (e) {
+    console.warn("[PIC followup] resolvePicFromMentions failed (non-blocking):", e.message);
+  }
+
+  if (!picText) {
+    // Decision: give up silently — leave PIC blank, send no message.
+    console.log(`[PIC followup] no resolvable PIC in reply "${body}" — leaving blank (silent).`);
+    return { picFollowup: true, unresolved: true };
+  }
+
+  await updateExistingSafetyIssueRow({
+    existingRow,
+    issueData: { pic: picText },
+    senderDetails: null, // preserve the original messageId in the Sender column
+    messageDate: null,
+    groupConfig,
+    isAlbumUpdate: true, // partial update — only the PIC cell is written
+  });
+  console.log(`[PIC followup] row ${existingRow.RowNumber} (S/N ${existingRow["S/N"]}) PIC → "${picText}"`);
+
+  try {
+    // Quote the reporter's reply — sendWhatsAppReply needs the SERIALIZED id to quote.
+    const replyToSerialized = message.messageIdSerialized || message.messageId || null;
+    await sendWhatsAppReply(
+      message.chatId || message.from,
+      `✅ PIC recorded: ${picText} (S/N ${existingRow["S/N"]})`,
+      undefined,
+      undefined,
+      replyToSerialized,
+    );
+  } catch (e) {
+    console.warn("[PIC followup] ack reply failed (non-blocking):", e.message);
+  }
+
+  return { picFollowup: true, updatedRow: existingRow.RowNumber, pic: picText };
+}
+
 module.exports = {
   createSafetyIssue,
   updateSafetyIssues,
+  parsePicRef,
+  buildPicRequestMessage,
+  handlePicFollowupReply,
   // createWBGTReading, // Commented out - replaced by API-triggered processWBGTReadingFromAPI
   processWBGTReadingFromAPI,
   determineHeatStressLevel,

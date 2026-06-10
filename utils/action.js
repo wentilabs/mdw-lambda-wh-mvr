@@ -1187,16 +1187,26 @@ async function updateStructuredData(data, senderDetails, groupConfig = null) {
 
     const updateData = [];
 
-    updateData.push([rowIndex + 1, 8, data.status]); // +1 for header row, 8 for column I (0-indexed)
-
-    if (data.mediaUrl) {
-      updateData.push([rowIndex + 1, 11, data.mediaUrl]); // 11 for column L
-    } else {
-      updateData.push([rowIndex + 1, 11, "no image provided"]);
+    // Resolve columns BY HEADER NAME (never hardcode indices) so the close write stays
+    // correct when the sheet layout changes — e.g. the inserted "PIC" column shifts Image/
+    // Status/Updated* right by one. Abort if any header is missing rather than corrupt cells.
+    const headers = sheetData[0] || [];
+    const colOf = (name) => headers.findIndex((h) => String(h).trim().toLowerCase() === name.toLowerCase());
+    const statusIdx = colOf("Status");
+    const imageAfterRectIdx = colOf("Image After Rectification");
+    const updatedTimestampIdx = colOf("Updated Timestamp");
+    const updatedByIdx = colOf("Updated By");
+    if ([statusIdx, imageAfterRectIdx, updatedTimestampIdx, updatedByIdx].some((i) => i < 0)) {
+      console.error(
+        `[updateStructuredData] Header lookup failed on "${targetSheetName}" (status=${statusIdx}, imageAfter=${imageAfterRectIdx}, updatedTs=${updatedTimestampIdx}, updatedBy=${updatedByIdx}); aborting to avoid corrupting columns.`,
+      );
+      return null;
     }
 
-    updateData.push([rowIndex + 1, 12, data.timestamp]); // 12 for column M
-    updateData.push([rowIndex + 1, 13, JSON.stringify(senderDetails)]); // 13 for column N
+    updateData.push([rowIndex + 1, statusIdx, data.status]);
+    updateData.push([rowIndex + 1, imageAfterRectIdx, data.mediaUrl ? data.mediaUrl : "no image provided"]);
+    updateData.push([rowIndex + 1, updatedTimestampIdx, data.timestamp]);
+    updateData.push([rowIndex + 1, updatedByIdx, JSON.stringify(senderDetails)]);
 
     // Use group-specific spreadsheet ID - required
     const targetSpreadsheetId = groupConfig?.spreadsheetId;

@@ -10,6 +10,8 @@ const {
   handleDeletedSafetyMessage,
   handleEditedSafetyMessage,
   resolveAlbumParentMessageId,
+  parsePicRef,
+  handlePicFollowupReply,
 } = require("../../handlers/safety-handlers");
 const {
   createManpowerData,
@@ -345,6 +347,16 @@ async function processMessageAgent(message) {
 
       console.log("✏️ Edited message not found on any sheet, processing as new");
       // Fall through to normal processing
+    }
+
+    // PIC follow-up: a reply to our "please tag the PIC" ask carries a
+    // "[ref: PIC-<originalMessageId>]" marker in quotedBody. Resolve the tagged person(s)
+    // and fill the original issue's PIC — same @mention→name flow as the create path.
+    // Deterministic short-circuit, BEFORE intent classification (like the sustainability
+    // [ref:] follow-up). The "PIC-" namespace can't collide with the Novade-Preview marker.
+    if (message.quotedBody && parsePicRef(message.quotedBody)) {
+      const picResult = await handlePicFollowupReply(message, senderDetails, groupConfig);
+      if (picResult) return picResult;
     }
 
     if (message.type === "image") {
