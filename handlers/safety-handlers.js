@@ -30,7 +30,7 @@ const {
   deleteRow,
 } = require("../utils/gsheet");
 const { getSupabaseClient } = require("../utils/common");
-const { resolvePicFromMentions, stripMentionIds } = require("../utils/name-list");
+const { resolvePicFromMentions, stripMentionIds, extractMentionIds } = require("../utils/name-list");
 const { previousMonthSafetyTab } = require("../utils/safety-sheets");
 const { sendWhatsAppReply, sendWhatsAppMessage } = require("../utils/sendMessage");
 const { writeToMonthlyMonitoringSheet } = require("./wbgt-monthly-handlers");
@@ -906,10 +906,11 @@ async function createSafetyIssue(message, mediaUrl = null, caption = null, sende
       }
 
       // PIC resolution: a safety message designates the person-in-charge by @mentioning
-      // them ("@<lid digits>"). Resolve those mention(s) to real names via the
-      // "Name List (proposed)" tab. A raw mention id must NEVER land in the PIC column, so
-      // we always strip "@<digits>" from the LLM-extracted pic first (leaving any explicit
-      // "PIC: name" text), then override with the resolved real names when available.
+      // them ("@<lid digits>"). Resolve each mention to a real name — Name List first, then
+      // whatsapp_listener history (latest pushname), and as a LAST RESORT the raw "@id" itself
+      // (so a tagged PIC is never dropped and we never re-ask). We strip "@<digits>" from the
+      // LLM-extracted pic first (leaving any explicit "PIC: name" text), then override with the
+      // resolved value when the body has mentions.
       // NOTE: do NOT add a new key to the item — writeGenericData maps columns by
       // Object.values() insertion order, so an extra property would shift a column.
       const llmPic = safetyItemsWithImage[0].pic;
@@ -1064,6 +1065,7 @@ async function createSafetyIssue(message, mediaUrl = null, caption = null, sende
         created &&
         created.status === "open" &&
         !String(created.pic || "").trim() &&
+        extractMentionIds(messageContent).length === 0 &&
         groupConfig?.spreadsheetId &&
         senderDetails?.messageId
       ) {
