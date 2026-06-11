@@ -181,7 +181,7 @@ async function resolveMentionViaListener(id) {
  * dropped and we never re-ask): try the curated Name List first, then whatsapp_listener
  * history, then fall back to the raw "@id" itself.
  *
- * display = whatsappName || phone || novadeName (Name List) | latest listener pushname/phone | "@id".
+ * display = novadeName || whatsappName || phone (Name List) | latest listener pushname/phone | "@id".
  * Order follows the body (first = primary, used as the Novade assignee).
  *
  * @param {string} body
@@ -197,12 +197,13 @@ async function resolvePicFromMentions(body, spreadsheetId) {
 
   const resolved = [];
   for (const id of ids) {
-    // 1) Curated Name List — whatsappName -> phone -> novadeName.
+    // 1) Curated Name List — use the NOVADE NAME (col A) as the PIC value so it bridges
+    //    directly to Novade; fall back to whatsapp name / phone only if the Novade Name is blank.
     const entry = map.get(id);
     let novadeName = entry ? entry.novadeName : "";
     let whatsappName = entry ? entry.whatsappName : "";
     let phone = entry ? entry.phone : "";
-    let display = entry ? entry.whatsappName || entry.phone || entry.novadeName : "";
+    let display = entry ? entry.novadeName || entry.whatsappName || entry.phone : "";
     let source = display ? "namelist" : "";
 
     // 2) whatsapp_listener fallback — recover the latest real pushname from message history.

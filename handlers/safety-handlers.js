@@ -31,6 +31,8 @@ const {
 } = require("../utils/gsheet");
 const { getSupabaseClient } = require("../utils/common");
 const { resolvePicFromMentions, stripMentionIds, extractMentionIds } = require("../utils/name-list");
+const { startPicEnrichment } = require("../utils/pic-enrichment");
+const picEnrichAdapter = require("../utils/pic-enrichment-adapter-whmbs");
 const { previousMonthSafetyTab } = require("../utils/safety-sheets");
 const { sendWhatsAppReply, sendWhatsAppMessage } = require("../utils/sendMessage");
 const { writeToMonthlyMonitoringSheet } = require("./wbgt-monthly-handlers");
@@ -915,10 +917,25 @@ async function createSafetyIssue(message, mediaUrl = null, caption = null, sende
       // Object.values() insertion order, so an extra property would shift a column.
       const llmPic = safetyItemsWithImage[0].pic;
       let resolvedPic = stripMentionIds(llmPic);
+      // Hoisted so the post-write block can start the Novade enrichment conversation.
+      let picEnrichUnresolved = [];
+      let picEnrichBaseNames = [];
       if (groupConfig?.spreadsheetId) {
         try {
-          const { picText } = await resolvePicFromMentions(messageContent, groupConfig.spreadsheetId);
+          const { picText, resolved } = await resolvePicFromMentions(messageContent, groupConfig.spreadsheetId);
           if (picText) resolvedPic = picText;
+          const resolvedArr = resolved || [];
+          picEnrichUnresolved = resolvedArr.filter((e) => e.source === "listener" || e.source === "raw");
+          picEnrichBaseNames = resolvedArr
+            .filter((e) => e.source === "namelist")
+            .map((e) => e.novadeName || e.display)
+            .filter(Boolean);
+          // When Novade enrichment will run for the unresolved tags, store ONLY the already-
+          // bridgeable Name List names at create time; the listener/raw ones are filled in
+          // after the reporter confirms each person via the enrichment conversation.
+          if (picEnrichUnresolved.length && picEnrichAdapter.hasNovade()) {
+            resolvedPic = picEnrichBaseNames.join(", ");
+          }
         } catch (e) {
           console.warn("[PIC @mention] resolution failed (non-blocking):", e.message);
         }
@@ -1061,7 +1078,26 @@ async function createSafetyIssue(message, mediaUrl = null, caption = null, sende
       // (Good Observation has status "N/A" → skipped.) Non-blocking — a send failure must
       // never fail the create. The reporter's reply is handled by handlePicFollowupReply.
       const created = safetyItemsWithImage[0];
+      const enrichAnchorId = senderDetails?.messageId;
       if (
+        created &&
+        created.status === "open" &&
+        groupConfig?.spreadsheetId &&
+        enrichAnchorId &&
+        picEnrichUnresolved.length &&
+        picEnrichAdapter.hasNovade()
+      ) {
+        // Novade + an unresolvable (listener/raw) tag → start the multi-turn enrichment flow.
+        await startPicEnrichment({
+          message,
+          senderDetails,
+          groupConfig,
+          anchorId: enrichAnchorId,
+          baseNames: picEnrichBaseNames,
+          unresolvedMentions: picEnrichUnresolved,
+          adapter: picEnrichAdapter,
+        });
+      } else if (
         created &&
         created.status === "open" &&
         !String(created.pic || "").trim() &&
@@ -2403,10 +2439,42 @@ async function handlePicFollowupReply(message, senderDetails = null, groupConfig
 
   const body = typeof message === "object" ? message.body : message;
   let picText = "";
+  let resolvedArr = [];
   try {
-    ({ picText } = await resolvePicFromMentions(body, groupConfig?.spreadsheetId));
+    ({ picText, resolved: resolvedArr } = await resolvePicFromMentions(body, groupConfig?.spreadsheetId));
+    resolvedArr = resolvedArr || [];
   } catch (e) {
     console.warn("[PIC followup] resolvePicFromMentions failed (non-blocking):", e.message);
+  }
+
+  // If the reporter tagged someone we can't bridge to Novade (listener/raw) and Novade is
+  // enabled, pivot into the multi-turn enrichment flow instead of writing a raw @id / bare name.
+  const followupUnresolved = resolvedArr.filter((e) => e.source === "listener" || e.source === "raw");
+  if (followupUnresolved.length && picEnrichAdapter.hasNovade() && groupConfig?.spreadsheetId) {
+    const baseNames = resolvedArr
+      .filter((e) => e.source === "namelist")
+      .map((e) => e.novadeName || e.display)
+      .filter(Boolean);
+    if (baseNames.length) {
+      await updateExistingSafetyIssueRow({
+        existingRow,
+        issueData: { pic: baseNames.join(", ") },
+        senderDetails: null,
+        messageDate: null,
+        groupConfig,
+        isAlbumUpdate: true,
+      });
+    }
+    await startPicEnrichment({
+      message,
+      senderDetails,
+      groupConfig,
+      anchorId: originalMessageId,
+      baseNames,
+      unresolvedMentions: followupUnresolved,
+      adapter: picEnrichAdapter,
+    });
+    return { picFollowup: true, enrichStarted: true };
   }
 
   if (!picText) {
@@ -2458,5 +2526,6 @@ module.exports = {
   SAFETY_SHEET_HEADERS,
   handleDeletedSafetyMessage,
   handleEditedSafetyMessage,
+  updateExistingSafetyIssueRow,
   resolveAlbumParentMessageId,
 };

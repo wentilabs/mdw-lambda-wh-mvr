@@ -13,6 +13,8 @@ const {
   parsePicRef,
   handlePicFollowupReply,
 } = require("../../handlers/safety-handlers");
+const { parsePicEnrichRef, handlePicEnrichmentReply } = require("../../utils/pic-enrichment");
+const picEnrichAdapter = require("../../utils/pic-enrichment-adapter-whmbs");
 const {
   createManpowerData,
   createWohhupManpowerData,
@@ -357,6 +359,14 @@ async function processMessageAgent(message) {
     if (message.quotedBody && parsePicRef(message.quotedBody)) {
       const picResult = await handlePicFollowupReply(message, senderDetails, groupConfig);
       if (picResult) return picResult;
+    }
+
+    // PIC enrichment follow-up: a reply quoting one of our enrichment messages carries a
+    // "[ref: PICENRICH-<state>]" marker — resume the multi-turn ask→confirm→Name-List flow.
+    // Checked AFTER the simple PIC-ref above (distinct "PICENRICH-" namespace; no collision).
+    if (message.quotedBody && parsePicEnrichRef(message.quotedBody)) {
+      const enrichResult = await handlePicEnrichmentReply(message, senderDetails, groupConfig, picEnrichAdapter);
+      if (enrichResult) return enrichResult;
     }
 
     if (message.type === "image") {
